@@ -1,0 +1,55 @@
+# 装甲板合成几何配置
+# 尺寸单位：米；width 是长边，height 是短边。
+# 大小装甲板分类与真实尺寸取自 UnifiedAutoAimPipeline：
+#   ArmorModel.h  BIG_ARMOR_W=0.225 / SMALL_ARMOR_W=0.133 / LIGHT_BAR_H=0.050
+#   ArmorPipeline.cpp  label==1 或 label==8 -> 大装甲板，其余 -> 小装甲板
+#
+# 每个装甲板生成三个同心矩形：
+#   sample (1) 采样区：取区内像素，按亮度取最暗的 dark_ratio，统计通道均值/方差
+#   fill   (2) 填充区：用上面的均值 + 同方差噪声填充
+#   paste  (3) 贴图区：尺寸/类型/关键点由 paste_content() 从下面的 paste_candidates 里随机选
+
+plate_types:
+  large:
+    labels: [1, 8]
+    size:   {width: 0.225, height: 0.050}   # 原矩形
+    sample: {width: 0.1125, height: 0.100}  # (1)
+    fill:   {width: 0.2925, height: 0.127}    # (2)
+
+  small:
+    labels: [0, 2, 3, 4, 5, 6, 7]
+    size:   {width: 0.133, height: 0.050}   # 原矩形
+    sample: {width: 0.0665, height: 0.100}  # (1)
+    fill:   {width: 0.1729, height: 0.125}  # (2)
+
+sampling:
+  dark_ratio: 0.30          # 按亮度升序取最暗的 30%
+
+fill:
+  noise_gain: 1.0           # 噪声标准差 = sqrt(采样方差) * noise_gain
+  clip: [0, 255]            # 填充值截断，避免溢出
+
+# ── 矩形 (3) 的候选目标 ─────────────────────────────────────────────────────
+# paste_content() 每次从下面随机挑一个，返回它的尺寸 / 类型 / 关键点。
+#   width, height : 矩形 (3) 的真实尺寸（米，width 为长边）
+#   type          : 写进 YOLO 标签的类别 id（int）
+#   image         : 该候选的占位图文件路径（相对项目根目录），直接加载，不在程序里生成
+#   keypoints     : 内容图内的归一化关键点，左上 (0,0)、右下 (1,1)
+# 注意：所有候选的关键点个数必须一致（YOLO-Pose 的 kpt_shape 是统一的），
+#       否则 YoloPoseWriter.finish() 会报错。
+paste_candidates:
+  - width: 0.05
+    height: 0.05
+    type: 0
+    image: assets/placeholder_t0.png   # 红
+    keypoints: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]]
+  - width: 0.10
+    height: 0.10
+    type: 1
+    image: assets/placeholder_t1.png   # 蓝
+    keypoints: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
+  - width: 0.10
+    height: 0.05
+    type: 2
+    image: assets/placeholder_t2.png   # 绿
+    keypoints: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
