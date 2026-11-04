@@ -38,18 +38,18 @@ fill:
 # 注意：所有候选的关键点个数必须一致（YOLO-Pose 的 kpt_shape 是统一的），
 #       否则 YoloPoseWriter.finish() 会报错。
 paste_candidates:
-  - width: 0.05
-    height: 0.05
+  - width: 0.140
+    height: 0.125
     type: 0
-    image: assets/placeholder_t0.png   # 红
+    image: assets/placeholder_t0_dot.png   # 红
     keypoints: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]]
-  - width: 0.10
-    height: 0.10
+  - width: 0.140
+    height: 0.125
     type: 1
-    image: assets/placeholder_t1.png   # 蓝
+    image: assets/placeholder_t1_dot.png   # 蓝
     keypoints: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
-  - width: 0.10
-    height: 0.05
+  - width: 0.225
+    height: 0.127
     type: 2
-    image: assets/placeholder_t2.png   # 绿
+    image: assets/placeholder_t2_dot.png   # 绿
     keypoints: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
