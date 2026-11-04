@@ -16,13 +16,14 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from armor import PlateSynth, YoloPoseWriter          # noqa: E402
-from armor.paste_providers import paste_content       # noqa: E402
+from armor.paste_providers import paste_content, set_seed   # noqa: E402
 
 INPUT_DIR = ROOT / "input"      # 输入图片文件夹
 DATASET_DIR = ROOT / "output"   # 输出 YOLO-Pose 数据集文件夹
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 VAL_RATIO = 0.2                 # 验证集比例：val 数量 = round(总数 * VAL_RATIO)
-SPLIT_SEED = 0                  # 随机划分的种子（固定后每次跑划分一样）
+# 统一随机种子：train/val 划分、贴图候选选择、(2) 的随机分块与拉伸方向、噪声都从它来
+SEED = 0
 
 
 def main():
@@ -35,13 +36,14 @@ def main():
     total = len(images)
     val_count = min(total, int(round(total * VAL_RATIO)))
     train_count = total - val_count
-    train_indices = set(random.Random(SPLIT_SEED).sample(range(total), train_count))
+    train_indices = set(random.Random(SEED).sample(range(total), train_count))
     print("输入 %s（%d 张图），数据集输出到 %s" % (INPUT_DIR, total, DATASET_DIR))
-    print("train %d 张 / val %d 张（VAL_RATIO=%.2f，SPLIT_SEED=%d）"
-          % (train_count, val_count, VAL_RATIO, SPLIT_SEED))
+    print("train %d 张 / val %d 张（VAL_RATIO=%.2f，SEED=%d）"
+          % (train_count, val_count, VAL_RATIO, SEED))
 
-    # 构造时把 paste 函数传进去；它负责给矩形 (3) 提供尺寸、内容、关键点和类型
-    synth = PlateSynth(paste_content)
+    # 种子统一在这里设置：paste 候选选择、PlateSynth 内部随机（噪声/分块/方向）
+    set_seed(SEED)
+    synth = PlateSynth(paste_content, seed=SEED)
     writer = YoloPoseWriter(DATASET_DIR)
 
     for index, path in enumerate(images):

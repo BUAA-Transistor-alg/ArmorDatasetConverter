@@ -4,7 +4,7 @@
 对一张图里的每个装甲板：
   1. 用四个关键点求出「装甲板平面 -> 图像」的单应 H；
   2. (1) 采样区：取区内像素，按亮度排序取最暗的 dark_ratio，统计各通道均值/方差；
-  3. (2) 填充区：用该均值 + 同方差高斯噪声填充；
+  3. (2) 填充区：把 (2) 边界外的像素按随机方向向内拉伸覆盖整个区域，再叠加同方差噪声；
   4. (3) 贴图区：尺寸和内容来自构造时传入的 paste 函数，贴完后把该函数给出的
      关键点投影到图像上，得到归一化的物体框和关键点，一起返回给调用者。
 三个矩形都与装甲板同心，共用同一个 H。
@@ -24,6 +24,8 @@ DEFAULT_CONFIG = PACKAGE_DIR / "config.yaml"
 DEFAULT_MODEL = ROOT_DIR / "models" / "0726.onnx"
 MIN_TEXTURE_PX = 8      # 目标区纹理边长下限（像素）
 MAX_TEXTURE_PX = 4096   # 目标区纹理边长上限（像素）
+FILL_MARGIN = 0.35      # (2) 每边外扩比例：用外扩的一圈提供“边界外的像素”
+FILL_PARTS = (3, 7)     # (2) 随机分割的份数范围（3~6 块，每块一个拉伸方向）
 
 
 def _load_config(path):
@@ -55,13 +57,14 @@ class PlateSynth:
                    keypoints 是 image 内的归一化关键点，obj_type 是 YOLO 类别 id。
     """
 
-    def __init__(self, paste_fn, model_path=DEFAULT_MODEL, config_path=DEFAULT_CONFIG):
+    def __init__(self, paste_fn, model_path=DEFAULT_MODEL, config_path=DEFAULT_CONFIG, seed=0):
         if not callable(paste_fn):
             raise TypeError("paste_fn 必须是可调用的函数")
         self.paste_fn = paste_fn
         self.config = _load_config(config_path)
         self.detector = ArmorDetector(model_path)
-        self.rng = np.random.default_rng(0)  # 固定噪声种子：同样的输入得到同样的输出
+        # 随机种子由 main.py 统一传入：控制噪声、(2) 的随机分块与拉伸方向
+        self.rng = np.random.default_rng(int(seed))
 
     # ------------------------------------------------------------------ 对外接口
     def process(self, image):
@@ -189,10 +192,64 @@ class PlateSynth:
         return self.rng.normal(0.0, 1.0, size=(target["tex_h"], target["tex_w"], 3)) * std[None, None, :]
 
     def _fill(self, image, target, stats):
-        """(2) 填充：通道均值 + 上述白噪声，截断到 clip 范围后贴进填充区。"""
+        """(2) 填充：把 (2) 边界外的像素按随机方向“拉伸”进来，再叠加噪声。
+
+        做法：
+          1. 把 (2) 矩形往外扩一圈后反投影成纹理，这样纹理里就包含 (2) 边界外的像素；
+          2. 在 (2) 内部随机切成 3~6 块（Voronoi），每块随机一个方向 d：
+             块内每个像素沿 d 射到 (2) 边界，再往外偏几个像素取样 ——
+             等价于把边界外的像素沿 -d 方向拉进区域内部，块与块方向不同；
+          3. 整个 (2) 被覆盖后，叠加与 (1) 采样方差相同的高斯噪声，截断到 clip。
+        """
         low, high = (float(v) for v in self.config["fill"]["clip"])
-        texture = np.clip(stats["mean"][None, None, :] + self._noise(target, stats), low, high)
-        self._blend(image, np.rint(texture).astype(np.uint8), target["W"])
+        tex_w, tex_h = target["tex_w"], target["tex_h"]
+        width_m, height_m = target["width_m"], target["height_m"]
+
+        # 1) 外扩一圈，让纹理里带上 (2) 边界外的像素（保持像素/米不变）
+        band_x = max(4, int(round(FILL_MARGIN * tex_w)))
+        band_y = max(4, int(round(FILL_MARGIN * tex_h)))
+        exp_w, exp_h = tex_w + 2 * band_x, tex_h + 2 * band_y
+        H = target["W"] @ np.linalg.inv(texture_to_plane(width_m, height_m, tex_w, tex_h))
+        W_exp = H @ texture_to_plane(width_m * exp_w / tex_w, height_m * exp_h / tex_h, exp_w, exp_h)
+        expanded = cv2.warpPerspective(image, np.linalg.inv(W_exp), (exp_w, exp_h),
+                                       flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+        # 2) 随机分成若干块，每块一个随机拉伸方向
+        parts = int(self.rng.integers(FILL_PARTS[0], FILL_PARTS[1]))
+        seeds = np.stack([self.rng.uniform(0, tex_w, parts),
+                          self.rng.uniform(0, tex_h, parts)], axis=1)
+        yy, xx = np.mgrid[0:tex_h, 0:tex_w].astype(np.float64)
+        distance = (xx[..., None] - seeds[:, 0]) ** 2 + (yy[..., None] - seeds[:, 1]) ** 2
+        labels = np.argmin(distance, axis=2)
+
+        map_x = np.zeros((tex_h, tex_w), dtype=np.float32)
+        map_y = np.zeros((tex_h, tex_w), dtype=np.float32)
+        offset = max(1.0, round(0.03 * min(tex_w, tex_h)))  # 越过边界再偏一点，确保取到边界外
+        eps = 1e-9
+        for part in range(parts):
+            section = labels == part
+            if not section.any():
+                continue
+            angle = self.rng.uniform(0.0, 2.0 * np.pi)
+            dx, dy = np.cos(angle), np.sin(angle)
+            # 每个像素沿 d 方向射到内部矩形的边界（t 为到边界的距离）
+            tx = np.where(dx > eps, (tex_w - 1 - xx) / np.maximum(dx, eps),
+                          np.where(dx < -eps, (0.0 - xx) / np.minimum(dx, -eps), np.inf))
+            ty = np.where(dy > eps, (tex_h - 1 - yy) / np.maximum(dy, eps),
+                          np.where(dy < -eps, (0.0 - yy) / np.minimum(dy, -eps), np.inf))
+            t = np.minimum(tx, ty) + offset
+            # 转到外扩纹理的坐标（内部区域偏移 band），并限制在外扩范围内
+            qx = np.clip(xx + t * dx + band_x, 0, exp_w - 1)
+            qy = np.clip(yy + t * dy + band_y, 0, exp_h - 1)
+            map_x[section] = qx[section].astype(np.float32)
+            map_y[section] = qy[section].astype(np.float32)
+
+        fill_tex = cv2.remap(expanded, map_x, map_y, interpolation=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+
+        # 3) 叠加与 (1) 采样方差相同的高斯噪声
+        texture = fill_tex.astype(np.float32) + self._noise(target, stats)
+        self._blend(image, np.clip(np.rint(texture), low, high).astype(np.uint8), target["W"])
 
     def _paste(self, image, target, content, stats):
         """(3) 贴图：缩放内容图 -> 叠加上与 (2) 区域相同的噪声 -> 单应映射进贴图区。"""

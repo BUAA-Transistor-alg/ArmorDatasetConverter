@@ -60,6 +60,11 @@ def _load_candidates(path):
 _CANDIDATES = _load_candidates(_CONFIG_PATH)
 
 
+def set_seed(seed):
+    """设置候选随机选择的种子；由 main.py 统一调用，保证整个数据集可复现。"""
+    _RNG.seed(int(seed))
+
+
 def paste_content(armor_type: int, color: int):
     """从候选目标里随机选一个，返回 (width_m, height_m, image, keypoints, obj_type)。"""
     candidate = _RNG.choice(_CANDIDATES)

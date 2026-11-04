@@ -6,7 +6,7 @@
 #
 # 每个装甲板生成三个同心矩形：
 #   sample (1) 采样区：取区内像素，按亮度取最暗的 dark_ratio，统计通道均值/方差
-#   fill   (2) 填充区：用上面的均值 + 同方差噪声填充
+#   fill   (2) 填充区：把 (2) 边界外的像素按随机方向拉伸进来 + 同方差噪声
 #   paste  (3) 贴图区：尺寸/类型/关键点由 paste_content() 从下面的 paste_candidates 里随机选
 
 plate_types:
