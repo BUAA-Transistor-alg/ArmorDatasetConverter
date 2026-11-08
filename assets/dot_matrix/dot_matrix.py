@@ -2,21 +2,21 @@
 # -*- coding: utf-8 -*-
 """dot_matrix.py -- 把 input/ 里的所有图片渲染成 LED 点阵屏（无命令行参数）
 
-和 RM_experiment/dot_matrix_screen 里的实验脚本相比有三处不同：
+实现方式：
   1. 不接受任何命令行参数，所有参数都是文件顶部的常量；
-  2. 每个通道的「单 cell 蒙版」不在运行时算，而是从 masks/ 目录读 PNG 文件：
+  2. 每个通道的「单个 cell 蒙版」从 masks/ 目录读取 PNG 文件：
          masks/<LAYOUT>_B.png
          masks/<LAYOUT>_G.png
          masks/<LAYOUT>_R.png
-     换蒙版 = 换文件，不改代码。PNG 里存 0~255 灰度，读进来 /255 当权重。
+     换蒙版就是换文件，不改代码。PNG 里存 0~255 灰度，读进来除以 255 当权重。
   3. 批量处理 input/ 里的**所有图片**，只输出最终结果到 output/，
-     **不写任何中间文件**（不再有 01/02/03/04 那些中间图）。
+     **不写任何中间文件**。
 
-处理链（每张图独立跑一遍）：
+处理链（每张图独立运行一遍）：
   1. 原图 INTER_AREA 下采样到 (ROWS, COLS) 点阵屏分辨率
   2. 建一整屏纯黑画布 (COLS*cell_w  x  ROWS*cell_h)
-  3. 读每个通道的单 cell 蒙版，缩放到 cell 大小
-  4. np.tile 把单 cell 蒙版平铺到每一个点阵像素，再按通道填色：
+  3. 读每个通道的单个 cell 蒙版，缩放到 cell 大小
+  4. np.tile 把单个 cell 蒙版平铺到每一个点阵像素，再按通道填色：
          out[..., c] = 最近邻放大后的通道 c * mask_tiled[c]
   5. uint8 -> float32（可以超过 255）
   6. 乘 GAIN 提亮
@@ -27,7 +27,7 @@
     python3 assets/dot_matrix/dot_matrix.py
 
     input/  放要处理的图（png/jpg/jpeg/bmp，只看这一层，不递归）
-    output/ 每张图输出一张同名 PNG，中间结果只在内存里，不落盘
+    output/ 每张图输出一张同名 PNG，中间结果只在内存里，不写入文件
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 
 INPUT_DIR = HERE / "input"     # 待点阵化的图片目录（处理这里面所有图片）
-MASK_DIR = HERE / "masks"      # 单 cell 蒙版目录，读 <LAYOUT>_B/G/R.png
+MASK_DIR = HERE / "masks"      # 单个 cell 蒙版目录，读 <LAYOUT>_B/G/R.png
 OUT_DIR = HERE / "output"      # 只放最终结果，不写中间文件
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")   # input/ 里认哪些扩展名
@@ -52,9 +52,9 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")   # input/ 里认哪些扩展名
 LAYOUT = "stripe"      # 用哪一套蒙版："circle"（圆点）或 "stripe"（RGB 竖条子像素）
 ROWS = 64              # 点阵屏行数
 COLS = 64              # 点阵屏列数
-OUT_SIZE = 2048        # 输出分辨率（自动对齐成 cell 的整数倍）
-GAIN = 8.0             # 提亮增益，越大越容易过曝成白
-SIGMA = 0.3           # 高斯 sigma，单位=cell 边长（长短边不一致时取短边）；0 = 不模糊
+OUT_SIZE = 2048        # 输出分辨率（取整为 cell 的整数倍）
+GAIN = 1.0             # 提亮增益，越大越容易过曝成白
+SIGMA = 0.0           # 高斯 sigma，单位是 cell 边长（长短边不一致时取短边）；0 = 不模糊
 
 CHANNEL_NAMES = ("B", "G", "R")   # 蒙版文件的通道后缀，也是数组的第 0/1/2 维
 
@@ -68,10 +68,10 @@ def downsample_to_matrix(img: np.ndarray, rows: int, cols: int) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
-# 2)+3) cell 大小 + 从 PNG 读每通道的单 cell 蒙版
+# 2)+3) cell 大小 + 从 PNG 读每通道的单个 cell 蒙版
 # --------------------------------------------------------------------------- #
 def cell_size(rows: int, cols: int, out_size: int) -> tuple:
-    """输出分辨率对齐到 cell 整数倍时，单个 cell 的 (高, 宽)。"""
+    """输出分辨率取整为 cell 整数倍时，单个 cell 的 (高, 宽)。"""
     cell_w = max(1, int(round(out_size / cols)))
     cell_h = max(1, int(round(out_size / rows)))
     return cell_h, cell_w
@@ -142,7 +142,7 @@ def clip_to_uint8(f: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
-# 完整流程（单张图，结果只在内存里，不落盘）
+# 完整流程（单张图，结果只在内存里，不写入文件）
 # --------------------------------------------------------------------------- #
 def render_dot_matrix(img: np.ndarray, rows: int = ROWS, cols: int = COLS,
                       out_size: int = OUT_SIZE, gain: float = GAIN, sigma: float = SIGMA,
@@ -190,7 +190,7 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"输入目录      : {INPUT_DIR}（{len(images)} 张图）")
-    print(f"点阵屏        : {COLS} x {ROWS} 个点，单 cell {cell_w} x {cell_h} px"
+    print(f"点阵屏        : {COLS} x {ROWS} 个点，单个 cell {cell_w} x {cell_h} px"
           f" -> 每张输出 {COLS * cell_w} x {ROWS * cell_h}")
     sigma_px = SIGMA * min(cell_w, cell_h)
     print(f"蒙版/增益/模糊: {LAYOUT}（masks/{LAYOUT}_B|G|R.png），gain={GAIN}，"

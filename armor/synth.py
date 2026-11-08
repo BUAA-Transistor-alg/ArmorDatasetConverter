@@ -3,7 +3,7 @@
 
 对一张图里的每个装甲板：
   1. 用四个关键点求出「装甲板平面 -> 图像」的单应 H；
-  2. (1) 采样区：取区内像素，按亮度排序取最暗的 dark_ratio，统计各通道均值/方差；
+  2. (1) 采样区：先保留亮度不高于平均亮度的像素，再按亮度取其中最暗的 dark_ratio，统计各通道均值/方差；
   3. (2) 填充区：把 (2) 边界外的像素按随机方向向内拉伸覆盖整个区域，再叠加同方差噪声；
   4. (3) 贴图区：尺寸和内容来自构造时传入的 paste 函数，贴完后把该函数给出的
      关键点投影到图像上，得到归一化的物体框和关键点，一起返回给调用者。
@@ -52,9 +52,10 @@ class PlateSynth:
     构造参数：
         paste_fn : 贴图区 (3) 的提供函数，形式为
                    paste_fn(armor_type: int, color: int) ->
-                       (width_m, height_m, image, keypoints, obj_type)
+                       (width_m, height_m, image, keypoints, obj_type, gain, blur_sigma)
                    armor_type 是类别 label（0~8），color 是 0=红 / 1=蓝；
-                   keypoints 是 image 内的归一化关键点，obj_type 是 YOLO 类别 id。
+                   keypoints 是 image 内的归一化关键点，obj_type 是 YOLO 类别 id；
+                   gain 是贴图区亮度增益，blur_sigma 是主图像上的高斯模糊标准差（像素）。
     """
 
     def __init__(self, paste_fn, model_path=DEFAULT_MODEL, config_path=DEFAULT_CONFIG, seed=0):
@@ -97,7 +98,8 @@ class PlateSynth:
         objects = []
         for plan, stats in jobs:
             self._fill(result, plan["fill"], stats)
-            self._paste(result, plan["paste"], plan["paste_image"], stats)
+            self._paste(result, plan["paste"], plan["paste_image"], stats,
+                        plan["paste_gain"], plan["paste_sigma"])
             obj = self._make_object(plan, result.shape)
             if obj is not None:
                 objects.append(obj)
@@ -118,7 +120,8 @@ class PlateSynth:
 
         sample_w, sample_h = _rect(spec, "sample")
         fill_w, fill_h = _rect(spec, "fill")
-        paste_w, paste_h, paste_image, paste_keypoints, obj_type = self._paste_content(detection)
+        (paste_w, paste_h, paste_image, paste_keypoints,
+         obj_type, paste_gain, paste_sigma) = self._paste_content(detection)
 
         return {
             "sample": self._target(H, ppm_w, ppm_h, sample_w, sample_h),
@@ -127,14 +130,17 @@ class PlateSynth:
             "paste_image": paste_image,
             "paste_keypoints": paste_keypoints,
             "paste_type": obj_type,
+            "paste_gain": paste_gain,
+            "paste_sigma": paste_sigma,
         }
 
     def _paste_content(self, detection):
-        """调用 paste 函数并检查返回值：(宽, 高, 图, 关键点, 类型)。"""
+        """调用 paste 函数并检查返回值：(宽, 高, 图, 关键点, 类型, 亮度增益, 模糊标准差)。"""
         result = self.paste_fn(int(detection.label), int(detection.color_id))
-        if not isinstance(result, (tuple, list)) or len(result) != 5:
-            raise TypeError("paste 函数必须返回 (width_m, height_m, image, keypoints, type) 五个值")
-        width_m, height_m, image, keypoints, obj_type = result
+        if not isinstance(result, (tuple, list)) or len(result) != 7:
+            raise TypeError(
+                "paste 函数必须返回 (width_m, height_m, image, keypoints, type, gain, blur_sigma) 七个值")
+        width_m, height_m, image, keypoints, obj_type, gain, blur_sigma = result
         width_m, height_m = float(width_m), float(height_m)
         if not (width_m > 0 and height_m > 0):
             raise ValueError("paste 函数返回的尺寸必须大于 0，实际为 (%r, %r)" % (width_m, height_m))
@@ -144,7 +150,13 @@ class PlateSynth:
         keypoints = np.asarray(keypoints, dtype=np.float64).reshape(-1, 2)
         if keypoints.size and not np.isfinite(keypoints).all():
             raise ValueError("paste 函数返回的关键点必须是有限数值")
-        return width_m, height_m, image, keypoints, int(obj_type)
+        gain = float(gain)
+        blur_sigma = float(blur_sigma)
+        if not gain > 0:
+            raise ValueError("paste 函数返回的 gain 必须大于 0，实际为 %r" % (gain,))
+        if not blur_sigma >= 0:
+            raise ValueError("paste 函数返回的 blur_sigma 必须大于等于 0，实际为 %r" % (blur_sigma,))
+        return width_m, height_m, image, keypoints, int(obj_type), gain, blur_sigma
 
     def _spec_for_label(self, label):
         """按类别 label 找大/小装甲板配置（label 1、8 是大装甲板）。"""
@@ -165,7 +177,7 @@ class PlateSynth:
 
     # ------------------------------------------------------------------ 三步
     def _sample(self, image, target):
-        """(1) 采样：把采样区反投影成纹理，取最暗的 dark_ratio 像素统计均值/方差。
+        """(1) 采样：把采样区反投影成纹理，在亮度不高于平均亮度的像素中取最暗的 dark_ratio 统计均值/方差。
 
         落在图像外的像素会被剔除；有效像素太少时返回 None（跳过该装甲板）。
         """
@@ -181,8 +193,12 @@ class PlateSynth:
         if pixels.shape[0] < 8:
             return None
         brightness = pixels.mean(axis=1)
-        count = max(1, int(round(self.config["sampling"]["dark_ratio"] * pixels.shape[0])))
-        darkest = pixels[np.argsort(brightness, kind="stable")[:count]]
+        mean_brightness = brightness.mean()
+        below_mean = brightness <= mean_brightness
+        candidates = pixels[below_mean]
+        candidate_brightness = brightness[below_mean]
+        count = max(1, int(round(self.config["sampling"]["dark_ratio"] * candidates.shape[0])))
+        darkest = candidates[np.argsort(candidate_brightness, kind="stable")[:count]]
         return {"mean": darkest.mean(axis=0), "var": darkest.var(axis=0)}
 
     def _noise(self, target, stats):
@@ -251,14 +267,45 @@ class PlateSynth:
         texture = fill_tex.astype(np.float32) + self._noise(target, stats)
         self._blend(image, np.clip(np.rint(texture), low, high).astype(np.uint8), target["W"])
 
-    def _paste(self, image, target, content, stats):
-        """(3) 贴图：缩放内容图 -> 叠加上与 (2) 区域相同的噪声 -> 单应映射进贴图区。"""
+    def _paste(self, image, target, content, stats, gain, blur_sigma):
+        """(3) 贴图：先把内容单应映射到主图像，再在主图像的贴图区域内提亮、做高斯模糊、叠加噪声。"""
         if content.shape[1] != target["tex_w"] or content.shape[0] != target["tex_h"]:
             shrinking = content.shape[1] > target["tex_w"] or content.shape[0] > target["tex_h"]
             content = cv2.resize(content, (target["tex_w"], target["tex_h"]),
                                  interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR)
-        noisy = content.astype(np.float32) + self._noise(target, stats)
-        self._blend(image, np.clip(np.rint(noisy), 0, 255).astype(np.uint8), target["W"])
+
+        height, width = image.shape[:2]
+        warped = cv2.warpPerspective(content, target["W"], (width, height), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        mask = np.full(content.shape[:2], 255, dtype=np.uint8)
+        alpha = cv2.warpPerspective(mask, target["W"], (width, height), flags=cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        alpha = (alpha.astype(np.float32) / 255.0)[..., None]
+
+        base = image.astype(np.float32)
+        pasted = base * (1.0 - alpha) + warped.astype(np.float32) * alpha
+
+        # 提亮只在贴图区域内生效
+        processed = pasted * gain
+        processed = processed * alpha + pasted * (1.0 - alpha)
+
+        # 高斯模糊在主图像坐标系里执行，区域外像素保持原样
+        if blur_sigma > 0:
+            blurred = cv2.GaussianBlur(processed.astype(np.float32), (0, 0),
+                                       sigmaX=blur_sigma, sigmaY=blur_sigma,
+                                       borderType=cv2.BORDER_REPLICATE)
+            processed = blurred * alpha + pasted * (1.0 - alpha)
+
+        # 噪声也只叠加在贴图区域内
+        ys, xs = np.nonzero(alpha[..., 0] > 0)
+        if ys.size:
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            std = np.sqrt(np.maximum(stats["var"], 0.0)) * float(self.config["fill"]["noise_gain"])
+            noise = self.rng.normal(0.0, 1.0, size=(y1 - y0, x1 - x0, 3)) * std[None, None, :]
+            processed[y0:y1, x0:x1] += noise * alpha[y0:y1, x0:x1]
+
+        image[...] = np.clip(np.rint(processed), 0, 255).astype(np.uint8)
 
     @staticmethod
     def _blend(image, texture, W):

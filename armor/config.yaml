@@ -5,7 +5,7 @@
 #   ArmorPipeline.cpp  label==1 或 label==8 -> 大装甲板，其余 -> 小装甲板
 #
 # 每个装甲板生成三个同心矩形：
-#   sample (1) 采样区：取区内像素，按亮度取最暗的 dark_ratio，统计通道均值/方差
+#   sample (1) 采样区：在亮度不高于平均亮度的像素中取最暗的 dark_ratio，统计通道均值/方差
 #   fill   (2) 填充区：把 (2) 边界外的像素按随机方向拉伸进来 + 同方差噪声
 #   paste  (3) 贴图区：尺寸/类型/关键点由 paste_content() 从下面的 paste_candidates 里随机选
 
@@ -23,18 +23,20 @@ plate_types:
     fill:   {width: 0.1729, height: 0.125}  # (2)
 
 sampling:
-  dark_ratio: 0.30          # 按亮度升序取最暗的 30%
+  dark_ratio: 0.70          # 在亮度不高于区域平均亮度的像素中，按亮度升序取最暗的 70%
 
 fill:
   noise_gain: 1.0           # 噪声标准差 = sqrt(采样方差) * noise_gain
   clip: [0, 255]            # 填充值截断，避免溢出
 
 # ── 矩形 (3) 的候选目标 ─────────────────────────────────────────────────────
-# paste_content() 每次从下面随机挑一个，返回它的尺寸 / 类型 / 关键点。
+# paste_content() 每次从下面随机挑一个，返回它的尺寸 / 类型 / 关键点 / 亮度增益 / 模糊参数。
 #   width, height : 矩形 (3) 的真实尺寸（米，width 为长边）
 #   type          : 写进 YOLO 标签的类别 id（int）
 #   image         : 该候选的占位图文件路径（相对项目根目录），直接加载，不在程序里生成
 #   keypoints     : 内容图内的归一化关键点，左上 (0,0)、右下 (1,1)
+#   gain          : 贴图区亮度增益，贴图内容先乘该值
+#   blur_sigma    : 贴图区高斯模糊标准差（主图像像素），0 表示不模糊
 # 注意：所有候选的关键点个数必须一致（YOLO-Pose 的 kpt_shape 是统一的），
 #       否则 YoloPoseWriter.finish() 会报错。
 paste_candidates:
@@ -43,13 +45,19 @@ paste_candidates:
     type: 0
     image: assets/placeholder_t0_dot.png   # 红
     keypoints: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]]
+    gain: 6.0
+    blur_sigma: 0.3
   - width: 0.140
     height: 0.125
     type: 1
     image: assets/placeholder_t1_dot.png   # 蓝
     keypoints: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
+    gain: 6.0
+    blur_sigma: 0.3
   - width: 0.225
     height: 0.127
     type: 2
     image: assets/placeholder_t2_dot.png   # 绿
     keypoints: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
+    gain: 6.0
+    blur_sigma: 0.3

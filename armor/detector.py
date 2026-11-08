@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""0726.onnx 推理，只用 onnxruntime：letterbox -> 推理 -> 解码 -> NMS。
+"""0726.onnx 推理，只用 onnxruntime，依次执行 letterbox、推理、解码和 NMS。
 
 模型输出约定（与 UnifiedAutoAimPipeline 的 C++ 后处理 postprocess0726 一致）：
     output0: float32 [1, 21, 6300]    6300 = 60*80 + 30*40 + 15*20（480x640 下的网格数）

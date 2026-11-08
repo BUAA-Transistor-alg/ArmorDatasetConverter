@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """把 input/ 里的所有图片处理成 YOLO-Pose 数据集（输出到 output/）。
 
-流程：读取 INPUT_DIR 下所有图片 -> PlateSynth.process() 得到（合成图, 物体列表）
-      -> YoloPoseWriter.add() 写一条数据 -> 全部写完后 writer.finish() 生成 dataset.yaml。
+流程：读取 INPUT_DIR 下所有图片，用 PlateSynth.process() 得到（合成图, 物体列表），
+再由 YoloPoseWriter.add() 写一条数据；全部写完后调用 writer.finish() 生成 dataset.yaml。
 没有命令行参数；要换目录/模型/处理逻辑，直接改下面这些常量或 armor/config.yaml。
 """
 import random
